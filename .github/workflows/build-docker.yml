@@ -1,4 +1,3 @@
-
 name: 🐳 Build & Push Docker Image
 
 on:
@@ -34,10 +33,11 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
           registry: docker.io
 
-      - name: 🏗️ Build and Push Docker image
+      - name: 🏗️ Build and Push Video Tools Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile.video-tools
           push: true
           tags: |
             cashewin/video-tools:latest
@@ -46,9 +46,14 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+          platforms: linux/amd64
 
-      - name: 📝 List built image details
-        run: docker images | grep video-tools || true
-
-      - name: ✅ Verify image pull
-        run: docker pull cashewin/video-tools:latest
+      - name: 🧪 Test built image
+        run: |
+          echo "🧪 Testing the built image..."
+          docker pull cashewin/video-tools:latest
+          echo "✅ FFmpeg version:"
+          docker run --rm cashewin/video-tools:latest ffmpeg -version | head -1
+          echo "✅ Installed fonts:"
+          docker run --rm cashewin/video-tools:latest fc-list | grep -i "noto" | head -3
+          echo "✅ Image ready with pre-installed fonts for: English, Hindi, Spanish, French, German, Russian"
