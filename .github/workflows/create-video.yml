@@ -57,7 +57,7 @@ jobs:
             curl -L -o assets/bgmusic.mp3 "${{ github.event.client_payload.background_music_url }}"
           fi
 
-      - name: 📝 Save subtitle text with UTF-8 encoding
+      - name: 📝 Save subtitle text
         if: github.event.client_payload.subtitle_text != '' && github.event.client_payload.subtitle_text != null
         run: |
           cat > /tmp/subtitle_text.txt <<'EOF'
@@ -75,9 +75,14 @@ jobs:
           # Get actual voiceover duration for proper video length
           DURATION=30
           if [ -f assets/voiceover.mp3 ]; then
-            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3)
-            DURATION=$(printf "%.0f" "$DURATION")
-            echo "🎤 Detected voiceover duration: ${DURATION}s"
+            RAW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3)
+            # Check if duration is a valid number (not N/A or empty)
+            if [[ "$RAW_DURATION" =~ ^[0-9]+\.?[0-9]*$ ]] && [ -n "$RAW_DURATION" ]; then
+              DURATION=$(printf "%.0f" "$RAW_DURATION")
+              echo "🎤 Detected voiceover duration: ${DURATION}s"
+            else
+              echo "⚠️  Could not detect voiceover duration (got: $RAW_DURATION), using default: ${DURATION}s"
+            fi
           else
             echo "⏱️  Using default duration: ${DURATION}s"
           fi
@@ -143,9 +148,9 @@ jobs:
 
           echo "✅ Base vertical video created"
 
-          # Generate multilingual subtitles with perfect audio sync
+          # Generate subtitles with perfect audio sync if subtitle text is provided
           if [ -f /tmp/subtitle_text.txt ]; then
-            echo "📝 Generating multilingual subtitles with perfect audio sync..."
+            echo "📝 Generating movie-quality subtitles with perfect audio sync..."
             SUBTITLE_TEXT=$(cat /tmp/subtitle_text.txt)
             
             # Split text into words for timing calculation
@@ -263,8 +268,13 @@ jobs:
           # Show final video info
           echo ""
           echo "📊 Final Video Info:"
-          FINAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "output/$OUTPUT_NAME")
-          echo "⏱️  Duration: ${FINAL_DURATION}s"
+          FINAL_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "output/$OUTPUT_NAME" 2>/dev/null || echo "unknown")
+          if [[ "$FINAL_DURATION" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+            FINAL_DURATION_ROUNDED=$(printf "%.1f" "$FINAL_DURATION")
+            echo "⏱️  Duration: ${FINAL_DURATION_ROUNDED}s"
+          else
+            echo "⏱️  Duration: ${FINAL_DURATION}"
+          fi
           echo "📐 Resolution: 1080x1920 (9:16 vertical)"
           FINAL_SIZE=$(ls -lh "output/$OUTPUT_NAME" | awk '{print $5}')
           echo "📦 Size: $FINAL_SIZE"
