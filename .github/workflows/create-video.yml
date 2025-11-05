@@ -7,7 +7,7 @@ on:
 jobs:
   create-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 15  # ⚡ FORCE KILL after 15 min to prevent infinite loops
+    timeout-minutes: 15
 
     container:
       image: docker.io/cashewin/video-tools:latest
@@ -25,7 +25,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 📦 Prepare assets from payload (PARALLEL DOWNLOADS)
-        timeout-minutes: 3  # ⚡ Kill if downloads take too long
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           mkdir -p assets output /tmp
@@ -86,14 +86,9 @@ jobs:
               echo "✅ PCM to MP3 conversion complete"
             fi
             
-            # Quick validation
-            VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null)
-            if [[ "$VO_DUR" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$VO_DUR > 0.1" | bc -l) )); then
-              echo "✅ Audio validated: ${VO_DUR}s"
-            else
-              echo "⚠️ Invalid audio, removing"
-              rm -f assets/voiceover.mp3
-            fi
+            # Validate voiceover file is not corrupted
+            VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "0")
+            echo "ℹ️ Voiceover file duration: ${VO_DUR}s"
           fi
 
       - name: 📝 Save subtitle text
@@ -104,7 +99,7 @@ jobs:
           EOF
 
       - name: 🎞️ Create vertical video (9:16) - SINGLE-PASS OPTIMIZED
-        timeout-minutes: 8  # ⚡ Kill if video creation takes too long
+        timeout-minutes: 8
         run: |
           set -euo pipefail
           
@@ -112,14 +107,30 @@ jobs:
           echo "🎥 VIDEO CREATION - OPTIMIZED SINGLE-PASS"
           echo "================================================"
           
-          # Get voiceover duration
-          DURATION=30
-          if [ -f assets/voiceover.mp3 ]; then
-            RAW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3)
-            if [[ "$RAW_DURATION" =~ ^[0-9]+\.?[0-9]*$ ]] && [ -n "$RAW_DURATION" ]; then
-              DURATION=$(printf "%.0f" "$RAW_DURATION")
+          # ⚡ CRITICAL: Use duration from app payload (user's selection)
+          PAYLOAD_DURATION="${{ github.event.client_payload.duration || '' }}"
+          
+          if [ -n "$PAYLOAD_DURATION" ] && [[ "$PAYLOAD_DURATION" =~ ^[0-9]+$ ]]; then
+            # User specified duration in app - USE THIS
+            DURATION=$PAYLOAD_DURATION
+            echo "✅ Using duration from app: ${DURATION}s"
+          elif [ -f assets/voiceover.mp3 ]; then
+            # No duration specified, detect from voiceover
+            RAW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "30")
+            DURATION_INT=$(printf "%.0f" "$RAW_DURATION" 2>/dev/null || echo "30")
+            
+            # Validate voiceover duration is reasonable (detect corruption)
+            if [[ "$DURATION_INT" =~ ^[0-9]+$ ]] && [ "$DURATION_INT" -ge 1 ] && [ "$DURATION_INT" -le 600 ]; then
+              DURATION=$DURATION_INT
               echo "🎤 Detected voiceover duration: ${DURATION}s"
+            else
+              echo "⚠️ Invalid voiceover duration detected (${DURATION_INT}s) - file may be corrupted. Using fallback: 30s"
+              DURATION=30
             fi
+          else
+            # No duration and no voiceover - use default
+            DURATION=30
+            echo "ℹ️ No duration specified, using default: ${DURATION}s"
           fi
           
           IMG_COUNT=$(ls -1 assets/image_*.png 2>/dev/null | wc -l)
@@ -133,7 +144,7 @@ jobs:
           
           echo "📊 Images: $IMG_COUNT | Duration: ${DURATION}s | Per-image: ${DURATION_PER_IMAGE}s"
 
-          # Build optimized filter - ⚡ REDUCED FPS to 24 for FASTER processing
+          # Build optimized filter - 24 FPS for speed
           FILTER_COMPLEX=""
           
           for i in $(seq 0 $((IMG_COUNT - 1))); do
@@ -241,6 +252,7 @@ jobs:
               -c:v libx264 -preset ultrafast -crf 25 \
               -c:a aac -b:a 128k \
               -movflags +faststart \
+              -t $DURATION \
               "output/$OUTPUT_NAME"
               
           elif [ "$HAS_VOICEOVER" = true ]; then
@@ -252,6 +264,7 @@ jobs:
               -c:v libx264 -preset ultrafast -crf 25 \
               -c:a aac -b:a 128k \
               -movflags +faststart \
+              -t $DURATION \
               "output/$OUTPUT_NAME"
               
           elif [ "$HAS_BGMUSIC" = true ]; then
@@ -263,6 +276,7 @@ jobs:
               -c:v libx264 -preset ultrafast -crf 25 \
               -c:a aac -b:a 128k \
               -movflags +faststart \
+              -t $DURATION \
               "output/$OUTPUT_NAME"
               
           else
@@ -273,6 +287,7 @@ jobs:
                 -vf "null${SUBTITLE_FILTER}" \
                 -c:v libx264 -preset ultrafast -crf 25 \
                 -movflags +faststart \
+                -t $DURATION \
                 "output/$OUTPUT_NAME"
             else
               mv output/base.mp4 "output/$OUTPUT_NAME"
@@ -369,7 +384,7 @@ jobs:
           echo "✅ Watermark applied"
 
       - name: 📤 Upload video to backend
-        timeout-minutes: 3  # ⚡ Prevent upload from hanging
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           
@@ -395,7 +410,6 @@ jobs:
           
           echo "📤 Uploading video to: $WEBHOOK_URL"
           
-          # ⚡ Added --max-time to prevent hanging
           HTTP_CODE=$(curl --max-time 180 -w "%{http_code}" -X POST "$WEBHOOK_URL" \
             -F "video=@output/$OUTPUT_NAME" \
             -F "status=success" \
@@ -415,9 +429,9 @@ jobs:
           fi
 
       - name: 🧹 INSTANT CLEANUP - Delete ALL resources
-        if: always()  # ⚡ ALWAYS runs - prevents loops
+        if: always()
         run: |
-          set +e  # Don't fail on cleanup errors
+          set +e
           
           echo "================================================"
           echo "🧹 INSTANT CLEANUP STARTING"
@@ -457,10 +471,9 @@ jobs:
           fi
           
           echo "🎉 Workflow complete - ALL resources deleted!"
-          echo "⏱️ Total workflow time: $SECONDS seconds"
 
       - name: ✅ Workflow completion marker
-        if: always()  # ⚡ CRITICAL - ensures workflow terminates properly
+        if: always()
         run: |
           echo "================================================"
           echo "✅ WORKFLOW FINISHED - NO LOOP POSSIBLE"
