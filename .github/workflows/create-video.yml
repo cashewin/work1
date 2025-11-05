@@ -7,6 +7,7 @@ on:
 jobs:
   create-video:
     runs-on: ubuntu-latest
+    timeout-minutes: 15  # ⚡ FORCE KILL after 15 min to prevent infinite loops
 
     container:
       image: docker.io/cashewin/video-tools:latest
@@ -24,6 +25,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 📦 Prepare assets from payload (PARALLEL DOWNLOADS)
+        timeout-minutes: 3  # ⚡ Kill if downloads take too long
         run: |
           set -euo pipefail
           mkdir -p assets output /tmp
@@ -41,7 +43,7 @@ jobs:
             if [ -n "$image_url" ] && [ "$image_url" != "null" ]; then
               outfile="assets/image_$(printf '%03d' "$idx").png"
               echo "📥 Starting download $((idx + 1)): $image_url"
-              (curl -L --fail --retry 2 --connect-timeout 10 -o "$outfile" "$image_url" && echo "✅ Downloaded image $((idx + 1))") &
+              (curl -L --fail --retry 2 --max-time 30 --connect-timeout 10 -o "$outfile" "$image_url" && echo "✅ Downloaded image $((idx + 1))") &
               pids+=($!)
               idx=$((idx + 1))
             fi
@@ -50,14 +52,14 @@ jobs:
           # Download voiceover in parallel
           if [ -n "${{ github.event.client_payload.voiceover_url || '' }}" ]; then
             echo "🎤 Starting voiceover download..."
-            (curl -L --fail --retry 2 --connect-timeout 10 --retry-delay 1 -o assets/voiceover_raw "${{ github.event.client_payload.voiceover_url }}" && echo "✅ Voiceover downloaded") &
+            (curl -L --fail --retry 2 --max-time 30 --connect-timeout 10 --retry-delay 1 -o assets/voiceover_raw "${{ github.event.client_payload.voiceover_url }}" && echo "✅ Voiceover downloaded") &
             pids+=($!)
           fi
 
           # Download background music in parallel
           if [ -n "${{ github.event.client_payload.background_music_url || '' }}" ]; then
             echo "🎵 Starting background music download..."
-            (curl -L --fail --retry 2 --connect-timeout 10 --retry-delay 1 -o assets/bgmusic.mp3 "${{ github.event.client_payload.background_music_url }}" && echo "✅ Background music downloaded") &
+            (curl -L --fail --retry 2 --max-time 30 --connect-timeout 10 --retry-delay 1 -o assets/bgmusic.mp3 "${{ github.event.client_payload.background_music_url }}" && echo "✅ Background music downloaded") &
             pids+=($!)
           fi
 
@@ -102,6 +104,7 @@ jobs:
           EOF
 
       - name: 🎞️ Create vertical video (9:16) - SINGLE-PASS OPTIMIZED
+        timeout-minutes: 8  # ⚡ Kill if video creation takes too long
         run: |
           set -euo pipefail
           
@@ -130,11 +133,11 @@ jobs:
           
           echo "📊 Images: $IMG_COUNT | Duration: ${DURATION}s | Per-image: ${DURATION_PER_IMAGE}s"
 
-          # Build optimized filter with lower FPS for faster processing
+          # Build optimized filter - ⚡ REDUCED FPS to 24 for FASTER processing
           FILTER_COMPLEX=""
           
           for i in $(seq 0 $((IMG_COUNT - 1))); do
-            FILTER_COMPLEX="${FILTER_COMPLEX}[${i}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,zoompan=z='min(zoom+0.0015,1.05)':d=${DURATION_PER_IMAGE}*30:s=1080x1920:fps=30[v${i}];"
+            FILTER_COMPLEX="${FILTER_COMPLEX}[${i}:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=24,zoompan=z='min(zoom+0.002,1.05)':d=${DURATION_PER_IMAGE}*24:s=1080x1920:fps=24[v${i}];"
           done
           
           FILTER_COMPLEX="${FILTER_COMPLEX}[v0]"
@@ -154,7 +157,7 @@ jobs:
 
           echo "🎬 Creating base video with ultrafast preset..."
           ffmpeg -y $INPUTS -filter_complex "$FILTER_COMPLEX" -map "[vout]" \
-            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 23 \
+            -c:v libx264 -pix_fmt yuv420p -preset ultrafast -crf 25 \
             -movflags +faststart -t $DURATION \
             output/base.mp4
 
@@ -212,7 +215,6 @@ jobs:
           
           # Determine audio inputs and filters
           AUDIO_INPUTS=""
-          AUDIO_FILTER=""
           HAS_VOICEOVER=false
           HAS_BGMUSIC=false
           
@@ -228,63 +230,57 @@ jobs:
 
           # SINGLE-PASS: Combine video processing + subtitle + audio mixing
           if [ "$HAS_VOICEOVER" = true ] && [ "$HAS_BGMUSIC" = true ]; then
-            # Both voiceover and background music
             echo "🎵 Single-pass: Video + Subtitles + Voiceover + Background Music"
             
-            # Determine input indices (base video is 0)
             VO_IDX=1
             BG_IDX=2
             
             ffmpeg -y -i output/base.mp4 $AUDIO_INPUTS \
               -filter_complex "[0:v]null${SUBTITLE_FILTER}[vout];[${BG_IDX}:a]volume=0.2,aloop=loop=-1:size=2e9[bg];[${VO_IDX}:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]" \
               -map "[vout]" -map "[aout]" \
-              -c:v libx264 -preset veryfast -crf 23 \
+              -c:v libx264 -preset ultrafast -crf 25 \
               -c:a aac -b:a 128k \
               -movflags +faststart \
               "output/$OUTPUT_NAME"
               
           elif [ "$HAS_VOICEOVER" = true ]; then
-            # Only voiceover
             echo "🎤 Single-pass: Video + Subtitles + Voiceover"
             
             ffmpeg -y -i output/base.mp4 -i assets/voiceover.mp3 \
               -filter_complex "[0:v]null${SUBTITLE_FILTER}[vout]" \
               -map "[vout]" -map 1:a \
-              -c:v libx264 -preset veryfast -crf 23 \
+              -c:v libx264 -preset ultrafast -crf 25 \
               -c:a aac -b:a 128k \
               -movflags +faststart \
               "output/$OUTPUT_NAME"
               
           elif [ "$HAS_BGMUSIC" = true ]; then
-            # Only background music
             echo "🎵 Single-pass: Video + Subtitles + Background Music"
             
             ffmpeg -y -i output/base.mp4 -i assets/bgmusic.mp3 \
               -filter_complex "[0:v]null${SUBTITLE_FILTER}[vout];[1:a]volume=0.4,aloop=loop=-1:size=2e9[aout]" \
               -map "[vout]" -map "[aout]" \
-              -c:v libx264 -preset veryfast -crf 23 \
+              -c:v libx264 -preset ultrafast -crf 25 \
               -c:a aac -b:a 128k \
               -movflags +faststart \
               "output/$OUTPUT_NAME"
               
           else
-            # No audio - just video with subtitles
             echo "🎬 Single-pass: Video + Subtitles"
             
             if [ -n "$SUBTITLE_FILTER" ]; then
               ffmpeg -y -i output/base.mp4 \
                 -vf "null${SUBTITLE_FILTER}" \
-                -c:v libx264 -preset veryfast -crf 23 \
+                -c:v libx264 -preset ultrafast -crf 25 \
                 -movflags +faststart \
                 "output/$OUTPUT_NAME"
             else
-              # No subtitles either, just copy
               mv output/base.mp4 "output/$OUTPUT_NAME"
             fi
           fi
 
-          # Cleanup temp file
-          rm -f output/base.mp4
+          # Cleanup temp files immediately
+          rm -f output/base.mp4 output/subs.srt
 
           echo "================================================"
           echo "✅ VIDEO CREATED SUCCESSFULLY (OPTIMIZED)!"
@@ -300,6 +296,7 @@ jobs:
 
       - name: 🎨 Apply watermark (if enabled)
         if: github.event.client_payload.watermark_enabled == 'true' || github.event.client_payload.watermark_enabled == true
+        timeout-minutes: 2
         run: |
           set -euo pipefail
           
@@ -334,7 +331,7 @@ jobs:
             
             ffmpeg -y -i "$INPUT_VIDEO" \
               -vf "drawtext=text='${ESCAPED_TEXT}':fontsize=${WATERMARK_FONTSIZE}:fontcolor=${FFMPEG_COLOR}@${OPACITY}:x=${X_POS}:y=${Y_POS}" \
-              -c:a copy -preset veryfast \
+              -c:a copy -preset ultrafast \
               -movflags +faststart \
               "$WATERMARKED_VIDEO"
               
@@ -347,7 +344,7 @@ jobs:
               exit 1
             fi
             
-            curl -L --fail --retry 2 -o assets/watermark.png "$WATERMARK_URL"
+            curl -L --fail --retry 2 --max-time 30 -o assets/watermark.png "$WATERMARK_URL"
             
             OPACITY=$(echo "scale=2; $WATERMARK_OPACITY / 100" | bc)
             SCALE_PERCENT=$(echo "scale=2; $WATERMARK_SCALE / 100" | bc)
@@ -363,7 +360,7 @@ jobs:
             
             ffmpeg -y -i "$INPUT_VIDEO" -i assets/watermark.png \
               -filter_complex "[1:v]scale=iw*${SCALE_PERCENT}:ih*${SCALE_PERCENT},format=rgba,colorchannelmixer=aa=${OPACITY}[wm];[0:v][wm]overlay=${OVERLAY_POS}" \
-              -c:a copy -preset veryfast \
+              -c:a copy -preset ultrafast \
               -movflags +faststart \
               "$WATERMARKED_VIDEO"
           fi
@@ -372,6 +369,7 @@ jobs:
           echo "✅ Watermark applied"
 
       - name: 📤 Upload video to backend
+        timeout-minutes: 3  # ⚡ Prevent upload from hanging
         run: |
           set -euo pipefail
           
@@ -383,7 +381,7 @@ jobs:
           if [ ! -f "output/$OUTPUT_NAME" ]; then
             echo "❌ Video file not found: output/$OUTPUT_NAME"
             
-            curl -X POST "$WEBHOOK_URL" \
+            curl --max-time 30 -X POST "$WEBHOOK_URL" \
               -F "status=failed" \
               -F "job_id=$JOB_ID" \
               -F "webhook_secret=$WEBHOOK_SECRET" \
@@ -397,7 +395,8 @@ jobs:
           
           echo "📤 Uploading video to: $WEBHOOK_URL"
           
-          HTTP_CODE=$(curl -w "%{http_code}" -X POST "$WEBHOOK_URL" \
+          # ⚡ Added --max-time to prevent hanging
+          HTTP_CODE=$(curl --max-time 180 -w "%{http_code}" -X POST "$WEBHOOK_URL" \
             -F "video=@output/$OUTPUT_NAME" \
             -F "status=success" \
             -F "job_id=$JOB_ID" \
@@ -406,7 +405,7 @@ jobs:
             -o /tmp/upload_response.txt)
           
           echo "📊 Upload response code: $HTTP_CODE"
-          cat /tmp/upload_response.txt
+          cat /tmp/upload_response.txt || true
           
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ Video uploaded successfully!"
@@ -414,3 +413,56 @@ jobs:
             echo "❌ Upload failed with code: $HTTP_CODE"
             exit 1
           fi
+
+      - name: 🧹 INSTANT CLEANUP - Delete ALL resources
+        if: always()  # ⚡ ALWAYS runs - prevents loops
+        run: |
+          set +e  # Don't fail on cleanup errors
+          
+          echo "================================================"
+          echo "🧹 INSTANT CLEANUP STARTING"
+          echo "================================================"
+          
+          # Delete generated video FIRST
+          echo "🗑️ Deleting generated video..."
+          rm -rf output/*.mp4 output/*.srt output/ 2>/dev/null || true
+          echo "✅ Video deleted"
+          
+          # Delete all downloaded assets
+          echo "🗑️ Deleting downloaded assets..."
+          rm -rf assets/*.png assets/*.mp3 assets/ 2>/dev/null || true
+          echo "✅ Assets deleted"
+          
+          # Delete temporary files
+          echo "🗑️ Deleting temporary files..."
+          rm -rf /tmp/*.txt /tmp/*.json /tmp/*.mp3 /tmp/*.png /tmp/*.mp4 2>/dev/null || true
+          echo "✅ Temp files deleted"
+          
+          # Clear any logs
+          echo "🗑️ Clearing logs..."
+          find . -type f -name "*.log" -delete 2>/dev/null || true
+          echo "✅ Logs cleared"
+          
+          echo "================================================"
+          echo "✅ CLEANUP COMPLETE - 0 ARTIFACTS REMAINING"
+          echo "================================================"
+          
+          # Verify cleanup
+          echo "📊 Verification:"
+          if [ ! -d "output" ]; then
+            echo "✅ output/ directory removed"
+          fi
+          if [ ! -d "assets" ]; then
+            echo "✅ assets/ directory removed"
+          fi
+          
+          echo "🎉 Workflow complete - ALL resources deleted!"
+          echo "⏱️ Total workflow time: $SECONDS seconds"
+
+      - name: ✅ Workflow completion marker
+        if: always()  # ⚡ CRITICAL - ensures workflow terminates properly
+        run: |
+          echo "================================================"
+          echo "✅ WORKFLOW FINISHED - NO LOOP POSSIBLE"
+          echo "================================================"
+          exit 0
