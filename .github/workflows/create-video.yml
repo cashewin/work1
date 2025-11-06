@@ -7,7 +7,7 @@ on:
 jobs:
   create-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60  # Changed from 15 to 60 minutes (1 hour safety timeout)
 
     container:
       image: docker.io/cashewin/video-tools:latest
@@ -99,7 +99,7 @@ jobs:
           EOF
 
       - name: 🎞️ Create vertical video (9:16) - SINGLE-PASS OPTIMIZED
-        timeout-minutes: 8
+        timeout-minutes: 50  # Increased from 8 to 50 minutes for longer videos
         run: |
           set -euo pipefail
           
@@ -311,7 +311,7 @@ jobs:
 
       - name: 🎨 Apply watermark (if enabled)
         if: github.event.client_payload.watermark_enabled == 'true' || github.event.client_payload.watermark_enabled == true
-        timeout-minutes: 2
+        timeout-minutes: 5  # Increased from 2 to 5 minutes
         run: |
           set -euo pipefail
           
@@ -384,7 +384,7 @@ jobs:
           echo "✅ Watermark applied"
 
       - name: 📤 Upload video to backend
-        timeout-minutes: 3
+        timeout-minutes: 5  # Increased from 3 to 5 minutes
         run: |
           set -euo pipefail
           
@@ -427,6 +427,55 @@ jobs:
             echo "❌ Upload failed with code: $HTTP_CODE"
             exit 1
           fi
+
+      - name: ❌ Notify backend on failure/cancellation
+        if: failure() || cancelled()
+        run: |
+          set +e  # Don't fail if notification fails
+          
+          echo "================================================"
+          echo "❌ WORKFLOW FAILED OR CANCELLED - NOTIFYING BACKEND"
+          echo "================================================"
+          
+          WEBHOOK_URL="${{ github.event.client_payload.callback_url }}"
+          JOB_ID="${{ github.event.client_payload.job_id }}"
+          WEBHOOK_SECRET="${{ github.event.client_payload.webhook_secret }}"
+          
+          # Determine failure reason
+          if [ "${{ job.status }}" = "cancelled" ]; then
+            ERROR_MESSAGE="Workflow was cancelled by admin or timeout (>1 hour)"
+            STATUS_TYPE="cancelled"
+          else
+            ERROR_MESSAGE="Workflow failed during video generation"
+            STATUS_TYPE="failed"
+          fi
+          
+          echo "🔔 Sending failure notification to backend..."
+          echo "   Status: $STATUS_TYPE"
+          echo "   Error: $ERROR_MESSAGE"
+          echo "   Job ID: $JOB_ID"
+          echo "   Run ID: ${{ github.run_id }}"
+          
+          # Send failure notification to backend
+          HTTP_CODE=$(curl --max-time 30 -w "%{http_code}" -X POST "$WEBHOOK_URL" \
+            -F "status=failed" \
+            -F "job_id=$JOB_ID" \
+            -F "webhook_secret=$WEBHOOK_SECRET" \
+            -F "run_id=${{ github.run_id }}" \
+            -F "error=$ERROR_MESSAGE" \
+            -F "failure_type=$STATUS_TYPE" \
+            -o /tmp/failure_response.txt 2>&1)
+          
+          echo "📊 Notification response code: $HTTP_CODE"
+          cat /tmp/failure_response.txt 2>/dev/null || true
+          
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "✅ Backend notified of failure"
+          else
+            echo "⚠️ Failed to notify backend (code: $HTTP_CODE) - cron job will handle cleanup"
+          fi
+          
+          echo "================================================"
 
       - name: 🧹 INSTANT CLEANUP - Delete ALL resources
         if: always()
