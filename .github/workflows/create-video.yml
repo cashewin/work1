@@ -7,7 +7,7 @@ on:
 jobs:
   create-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # Changed from 15 to 60 minutes (1 hour safety timeout)
+    timeout-minutes: 60  # 1 hour safety timeout
 
     container:
       image: docker.io/cashewin/video-tools:latest
@@ -99,7 +99,7 @@ jobs:
           EOF
 
       - name: 🎞️ Create vertical video (9:16) - SINGLE-PASS OPTIMIZED
-        timeout-minutes: 50  # Increased from 8 to 50 minutes for longer videos
+        timeout-minutes: 50
         run: |
           set -euo pipefail
           
@@ -107,30 +107,33 @@ jobs:
           echo "🎥 VIDEO CREATION - OPTIMIZED SINGLE-PASS"
           echo "================================================"
           
-          # ⚡ CRITICAL: Use duration from app payload (user's selection)
-          PAYLOAD_DURATION="${{ github.event.client_payload.duration || '' }}"
+          # ⚡ FIXED: ALWAYS use voiceover duration if voiceover exists
+          # Only use payload duration if there's NO voiceover
           
-          if [ -n "$PAYLOAD_DURATION" ] && [[ "$PAYLOAD_DURATION" =~ ^[0-9]+$ ]]; then
-            # User specified duration in app - USE THIS
-            DURATION=$PAYLOAD_DURATION
-            echo "✅ Using duration from app: ${DURATION}s"
-          elif [ -f assets/voiceover.mp3 ]; then
-            # No duration specified, detect from voiceover
+          if [ -f assets/voiceover.mp3 ]; then
+            # Voiceover exists - USE ITS ACTUAL DURATION (not payload duration)
             RAW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "30")
             DURATION_INT=$(printf "%.0f" "$RAW_DURATION" 2>/dev/null || echo "30")
             
             # Validate voiceover duration is reasonable (detect corruption)
             if [[ "$DURATION_INT" =~ ^[0-9]+$ ]] && [ "$DURATION_INT" -ge 1 ] && [ "$DURATION_INT" -le 600 ]; then
               DURATION=$DURATION_INT
-              echo "🎤 Detected voiceover duration: ${DURATION}s"
+              echo "🎤 Using ACTUAL voiceover duration: ${DURATION}s (ignoring payload duration)"
             else
               echo "⚠️ Invalid voiceover duration detected (${DURATION_INT}s) - file may be corrupted. Using fallback: 30s"
               DURATION=30
             fi
           else
-            # No duration and no voiceover - use default
-            DURATION=30
-            echo "ℹ️ No duration specified, using default: ${DURATION}s"
+            # No voiceover - use payload duration or default
+            PAYLOAD_DURATION="${{ github.event.client_payload.duration || '' }}"
+            
+            if [ -n "$PAYLOAD_DURATION" ] && [[ "$PAYLOAD_DURATION" =~ ^[0-9]+$ ]]; then
+              DURATION=$PAYLOAD_DURATION
+              echo "✅ Using duration from payload: ${DURATION}s (no voiceover)"
+            else
+              DURATION=30
+              echo "ℹ️ No duration specified, using default: ${DURATION}s"
+            fi
           fi
           
           IMG_COUNT=$(ls -1 assets/image_*.png 2>/dev/null | wc -l)
@@ -311,7 +314,7 @@ jobs:
 
       - name: 🎨 Apply watermark (if enabled)
         if: github.event.client_payload.watermark_enabled == 'true' || github.event.client_payload.watermark_enabled == true
-        timeout-minutes: 5  # Increased from 2 to 5 minutes
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           
@@ -384,7 +387,7 @@ jobs:
           echo "✅ Watermark applied"
 
       - name: 📤 Upload video to backend
-        timeout-minutes: 5  # Increased from 3 to 5 minutes
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           
@@ -431,7 +434,7 @@ jobs:
       - name: ❌ Notify backend on failure/cancellation
         if: failure() || cancelled()
         run: |
-          set +e  # Don't fail if notification fails
+          set +e
           
           echo "================================================"
           echo "❌ WORKFLOW FAILED OR CANCELLED - NOTIFYING BACKEND"
