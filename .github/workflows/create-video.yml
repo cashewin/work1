@@ -7,7 +7,7 @@ on:
 jobs:
   create-video:
     runs-on: ubuntu-latest
-    timeout-minutes: 60  # 1 hour safety timeout
+    timeout-minutes: 60
 
     container:
       image: docker.io/cashewin/video-tools:latest
@@ -72,23 +72,43 @@ jobs:
           echo "📊 Total images: $idx"
           ls -lh assets/
 
-          # Process voiceover if exists
+          # Process voiceover if exists - FIXED VALIDATION
           if [ -f assets/voiceover_raw ]; then
-            if ffprobe -v error -select_streams a -show_entries stream=codec_name -of csv=p=0 assets/voiceover_raw >/dev/null 2>&1; then
-              mv assets/voiceover_raw assets/voiceover.mp3
-              echo "✅ Audio file ready (already encoded)"
+            echo "🔍 Validating voiceover file..."
+            
+            # Check if it's a valid audio file with proper audio stream
+            if ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 assets/voiceover_raw 2>/dev/null | grep -q "."; then
+              # Valid audio file detected
+              CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 assets/voiceover_raw 2>/dev/null)
+              echo "✅ Valid audio detected (codec: $CODEC)"
+              
+              # Re-encode to ensure compatibility
+              echo "🔄 Re-encoding to MP3 for compatibility..."
+              ffmpeg -y -i assets/voiceover_raw \
+                -c:a libmp3lame -b:a 128k -ar 48000 -ac 1 \
+                assets/voiceover.mp3 2>&1 | tail -20
+              
+              rm assets/voiceover_raw
+              echo "✅ Audio re-encoded to MP3"
             else
-              echo "🔄 Converting PCM to MP3..."
+              # Not valid audio - try PCM conversion
+              echo "⚠️ Not a standard audio file, attempting PCM conversion..."
               ffmpeg -y -f s16le -ar 24000 -ac 1 -i assets/voiceover_raw \
                 -c:a libmp3lame -b:a 128k -ar 48000 \
-                assets/voiceover.mp3
+                assets/voiceover.mp3 2>&1 | tail -20
+              
               rm assets/voiceover_raw
               echo "✅ PCM to MP3 conversion complete"
             fi
             
-            # Validate voiceover file is not corrupted
-            VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "0")
-            echo "ℹ️ Voiceover file duration: ${VO_DUR}s"
+            # Final validation - verify voiceover.mp3 is usable
+            if ! ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null | grep -q "."; then
+              echo "❌ Voiceover file is corrupted or invalid - removing it"
+              rm -f assets/voiceover.mp3
+            else
+              VO_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "0")
+              echo "✅ Voiceover validated - Duration: ${VO_DUR}s"
+            fi
           fi
 
       - name: 📝 Save subtitle text
@@ -107,24 +127,19 @@ jobs:
           echo "🎥 VIDEO CREATION - OPTIMIZED SINGLE-PASS"
           echo "================================================"
           
-          # ⚡ FIXED: ALWAYS use voiceover duration if voiceover exists
-          # Only use payload duration if there's NO voiceover
-          
+          # FIXED: ALWAYS use voiceover duration if voiceover exists
           if [ -f assets/voiceover.mp3 ]; then
-            # Voiceover exists - USE ITS ACTUAL DURATION (not payload duration)
             RAW_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 assets/voiceover.mp3 2>/dev/null || echo "30")
             DURATION_INT=$(printf "%.0f" "$RAW_DURATION" 2>/dev/null || echo "30")
             
-            # Validate voiceover duration is reasonable (detect corruption)
             if [[ "$DURATION_INT" =~ ^[0-9]+$ ]] && [ "$DURATION_INT" -ge 1 ] && [ "$DURATION_INT" -le 600 ]; then
               DURATION=$DURATION_INT
-              echo "🎤 Using ACTUAL voiceover duration: ${DURATION}s (ignoring payload duration)"
+              echo "🎤 Using ACTUAL voiceover duration: ${DURATION}s"
             else
-              echo "⚠️ Invalid voiceover duration detected (${DURATION_INT}s) - file may be corrupted. Using fallback: 30s"
+              echo "⚠️ Invalid voiceover duration (${DURATION_INT}s) - using fallback: 30s"
               DURATION=30
             fi
           else
-            # No voiceover - use payload duration or default
             PAYLOAD_DURATION="${{ github.event.client_payload.duration || '' }}"
             
             if [ -n "$PAYLOAD_DURATION" ] && [[ "$PAYLOAD_DURATION" =~ ^[0-9]+$ ]]; then
@@ -444,7 +459,6 @@ jobs:
           JOB_ID="${{ github.event.client_payload.job_id }}"
           WEBHOOK_SECRET="${{ github.event.client_payload.webhook_secret }}"
           
-          # Determine failure reason
           if [ "${{ job.status }}" = "cancelled" ]; then
             ERROR_MESSAGE="Workflow was cancelled by admin or timeout (>1 hour)"
             STATUS_TYPE="cancelled"
@@ -459,7 +473,6 @@ jobs:
           echo "   Job ID: $JOB_ID"
           echo "   Run ID: ${{ github.run_id }}"
           
-          # Send failure notification to backend
           HTTP_CODE=$(curl --max-time 30 -w "%{http_code}" -X POST "$WEBHOOK_URL" \
             -F "status=failed" \
             -F "job_id=$JOB_ID" \
@@ -489,40 +502,21 @@ jobs:
           echo "🧹 INSTANT CLEANUP STARTING"
           echo "================================================"
           
-          # Delete generated video FIRST
-          echo "🗑️ Deleting generated video..."
           rm -rf output/*.mp4 output/*.srt output/ 2>/dev/null || true
           echo "✅ Video deleted"
           
-          # Delete all downloaded assets
-          echo "🗑️ Deleting downloaded assets..."
           rm -rf assets/*.png assets/*.mp3 assets/ 2>/dev/null || true
           echo "✅ Assets deleted"
           
-          # Delete temporary files
-          echo "🗑️ Deleting temporary files..."
           rm -rf /tmp/*.txt /tmp/*.json /tmp/*.mp3 /tmp/*.png /tmp/*.mp4 2>/dev/null || true
           echo "✅ Temp files deleted"
           
-          # Clear any logs
-          echo "🗑️ Clearing logs..."
           find . -type f -name "*.log" -delete 2>/dev/null || true
           echo "✅ Logs cleared"
           
           echo "================================================"
           echo "✅ CLEANUP COMPLETE - 0 ARTIFACTS REMAINING"
           echo "================================================"
-          
-          # Verify cleanup
-          echo "📊 Verification:"
-          if [ ! -d "output" ]; then
-            echo "✅ output/ directory removed"
-          fi
-          if [ ! -d "assets" ]; then
-            echo "✅ assets/ directory removed"
-          fi
-          
-          echo "🎉 Workflow complete - ALL resources deleted!"
 
       - name: ✅ Workflow completion marker
         if: always()
