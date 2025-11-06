@@ -72,18 +72,17 @@ jobs:
           echo "📊 Total images: $idx"
           ls -lh assets/
 
-          # Process voiceover if exists - FIXED VALIDATION
+          # Process voiceover if exists - CONVERT PCM TO MP3 HERE
           if [ -f assets/voiceover_raw ]; then
             echo "🔍 Validating voiceover file..."
             
             # Check if it's a valid audio file with proper audio stream
             if ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 assets/voiceover_raw 2>/dev/null | grep -q "."; then
-              # Valid audio file detected
+              # Valid audio file detected - re-encode to MP3
               CODEC=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 assets/voiceover_raw 2>/dev/null)
               echo "✅ Valid audio detected (codec: $CODEC)"
               
-              # Re-encode to ensure compatibility
-              echo "🔄 Re-encoding to MP3 for compatibility..."
+              echo "🔄 Re-encoding to MP3..."
               ffmpeg -y -i assets/voiceover_raw \
                 -c:a libmp3lame -b:a 128k -ar 48000 -ac 1 \
                 assets/voiceover.mp3 2>&1 | tail -20
@@ -92,13 +91,13 @@ jobs:
               echo "✅ Audio re-encoded to MP3"
             else
               # Not valid audio - try PCM conversion
-              echo "⚠️ Not a standard audio file, attempting PCM conversion..."
+              echo "⚠️ Not a standard audio file, attempting PCM→MP3 conversion..."
               ffmpeg -y -f s16le -ar 24000 -ac 1 -i assets/voiceover_raw \
                 -c:a libmp3lame -b:a 128k -ar 48000 \
                 assets/voiceover.mp3 2>&1 | tail -20
               
               rm assets/voiceover_raw
-              echo "✅ PCM to MP3 conversion complete"
+              echo "✅ PCM converted to MP3"
             fi
             
             # Final validation - verify voiceover.mp3 is usable
@@ -468,10 +467,6 @@ jobs:
           fi
           
           echo "🔔 Sending failure notification to backend..."
-          echo "   Status: $STATUS_TYPE"
-          echo "   Error: $ERROR_MESSAGE"
-          echo "   Job ID: $JOB_ID"
-          echo "   Run ID: ${{ github.run_id }}"
           
           HTTP_CODE=$(curl --max-time 30 -w "%{http_code}" -X POST "$WEBHOOK_URL" \
             -F "status=failed" \
@@ -483,45 +478,25 @@ jobs:
             -o /tmp/failure_response.txt 2>&1)
           
           echo "📊 Notification response code: $HTTP_CODE"
-          cat /tmp/failure_response.txt 2>/dev/null || true
           
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ Backend notified of failure"
           else
-            echo "⚠️ Failed to notify backend (code: $HTTP_CODE) - cron job will handle cleanup"
+            echo "⚠️ Failed to notify backend - cron job will handle cleanup"
           fi
-          
-          echo "================================================"
 
       - name: 🧹 INSTANT CLEANUP - Delete ALL resources
         if: always()
         run: |
           set +e
           
-          echo "================================================"
           echo "🧹 INSTANT CLEANUP STARTING"
-          echo "================================================"
-          
-          rm -rf output/*.mp4 output/*.srt output/ 2>/dev/null || true
-          echo "✅ Video deleted"
-          
-          rm -rf assets/*.png assets/*.mp3 assets/ 2>/dev/null || true
-          echo "✅ Assets deleted"
-          
-          rm -rf /tmp/*.txt /tmp/*.json /tmp/*.mp3 /tmp/*.png /tmp/*.mp4 2>/dev/null || true
-          echo "✅ Temp files deleted"
-          
+          rm -rf output/ assets/ /tmp/*.txt /tmp/*.json 2>/dev/null || true
           find . -type f -name "*.log" -delete 2>/dev/null || true
-          echo "✅ Logs cleared"
-          
-          echo "================================================"
-          echo "✅ CLEANUP COMPLETE - 0 ARTIFACTS REMAINING"
-          echo "================================================"
+          echo "✅ CLEANUP COMPLETE"
 
       - name: ✅ Workflow completion marker
         if: always()
         run: |
-          echo "================================================"
-          echo "✅ WORKFLOW FINISHED - NO LOOP POSSIBLE"
-          echo "================================================"
+          echo "✅ WORKFLOW FINISHED"
           exit 0
